@@ -1,0 +1,3 @@
+pyupbit
+pandas
+numpy
