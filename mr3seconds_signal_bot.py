@@ -16,8 +16,8 @@ import logging as _logging, csv as _csv
 # --------------------------------------------------------------------------
 # [ 사용자 설정 영역 ]
 # --------------------------------------------------------------------------
-access_key = "UeJM8GDCxiZLgdwa9Duh7Hgpq0RxkRzKbaa6nXks"        # 업비트 액세스 키 입력
-secret_key = "mtUQbUwMUee3m448jOBcQsA2itBJjxuTe3W6E55t"        # 업비트 시크릿 키 입력
+access_key = "여기에_액세스키_입력"        # 업비트 액세스 키 입력
+secret_key = "여기에_시크릿키_입력"        # 업비트 시크릿 키 입력
 
 # 거래 대상 및 기본 설정
 max_scan_tickers = 50            # 스캔 종목 수 제한 (API 속도 제한 방지)
