@@ -16,12 +16,19 @@ import logging as _logging, csv as _csv
 # --------------------------------------------------------------------------
 # [ 사용자 설정 영역 ]
 # --------------------------------------------------------------------------
-access_key = "여기에_액세스키_입력"        # 업비트 액세스 키 입력
-secret_key = "여기에_시크릿키_입력"        # 업비트 시크릿 키 입력
+access_key = "UeJM8GDCxiZLgdwa9Duh7Hgpq0RxkRzKbaa6nXks"        # 업비트 액세스 키 입력
+secret_key = "mtUQbUwMUee3m448jOBcQsA2itBJjxuTe3W6E55t"        # 업비트 시크릿 키 입력
 
 # 거래 대상 및 기본 설정
 max_scan_tickers = 50            # 스캔 종목 수 제한 (API 속도 제한 방지)
-tickers        = pyupbit.get_tickers(fiat="KRW")[:max_scan_tickers]
+
+# 스테이블코인 제외: 가격 고정 코인은 RSI/MACD 신호가 의미 없어 수수료 손실만 발생
+_STABLE_EXCLUSIONS = {
+    'KRW-USDT', 'KRW-USDC', 'KRW-DAI', 'KRW-BUSD',
+    'KRW-USDE', 'KRW-USD1', 'KRW-USDS', 'KRW-TUSD', 'KRW-USDP',
+}
+tickers        = [t for t in pyupbit.get_tickers(fiat="KRW")
+                  if t not in _STABLE_EXCLUSIONS][:max_scan_tickers]
 timeframe      = 'minute60'      # 시간봉 기준
 fee            = 0.0005          # 거래 수수료 0.05%
 
@@ -110,6 +117,18 @@ def get_historical_data(ticker: str, interval: str, count: int = 200):
     except Exception as e:
         print(f"[{ticker}] ❌ 데이터 오류: {e}")
         return None
+
+
+def is_btc_bullish() -> bool:
+    """BTC MA20 기준 추세 확인 — False이면 하락장으로 신규 매수 차단"""
+    try:
+        df = get_historical_data("KRW-BTC", timeframe, 30)
+        if df is None or len(df) < 21:
+            return True  # 데이터 부족 시 매수 허용 (보수적 기본값)
+        ma20 = df['close'].rolling(20).mean().iloc[-1]
+        return df['close'].iloc[-1] >= ma20
+    except Exception:
+        return True  # 오류 시 매수 허용
 
 
 def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
@@ -323,6 +342,10 @@ def main():
         print("❌ 업비트 연동 실패. 종료합니다.")
         return
 
+    # 최소 보유시간 설정 (캔들 1개 = 3600초)
+    # 매수 직후 즉시 청산 신호로 빠져나가는 문제 방지
+    MIN_HOLD_SECONDS = 3600  # 1시간봉 기준 최소 1캔들 보유
+
     # 포지션 초기화
     positions = {
         t: {
@@ -330,7 +353,8 @@ def main():
             'entry_price'  : 0.0,
             'stop_loss'    : 0.0,
             'amount'       : 0.0,
-            'profit_stage' : 0
+            'profit_stage' : 0,
+            'last_buy_time': None,  # 매수 시각 기록 (최소 보유시간 체크용)
         } for t in tickers
     }
 
@@ -405,6 +429,11 @@ def main():
                         print(f"  ⚠️ 최대 보유 종목({max_positions}개) 도달")
                         continue
 
+                    # BTC 추세 필터: BTC가 MA20 아래 하락장이면 신규 매수 차단
+                    if not is_btc_bullish():
+                        print(f"  ⚠️ BTC 하락장 감지 → 신규 매수 차단")
+                        continue
+
                     if sig['signal'] == 'BUY' and sig['strength'] >= 2:
                         order_amt = update_order_amount()
                         krw_bal   = upbit.get_balance("KRW")
@@ -422,7 +451,8 @@ def main():
                                 'entry_price' : avg,
                                 'amount'      : amt,
                                 'stop_loss'   : sl,
-                                'profit_stage': 0
+                                'profit_stage': 0,
+                                'last_buy_time': datetime.datetime.now(),
                             })
                             print(f"  ✅ 매수 완료 | 평균가: {avg:,.0f} | 손절: {sl:,.0f}")
                         else:
@@ -430,11 +460,19 @@ def main():
 
                 # ── 보유 상태 → 수익확정 / 손절 / 포지션 유지 ─────────────
                 else:
-                    # 수익 확정 체크
-                    sold, reason = check_profit_targets(ticker, cur, pos)
-                    if sold:
-                        print(f"  💎 {reason}")
-                        time.sleep(2)
+                    # 최소 보유시간 체크 (매수 직후 즉시 청산 방지)
+                    buy_time = pos.get('last_buy_time')
+                    held_seconds = (datetime.datetime.now() - buy_time).total_seconds() if buy_time else MIN_HOLD_SECONDS + 1
+                    min_hold_passed = held_seconds >= MIN_HOLD_SECONDS
+
+                    # 수익 확정 체크 (최소 보유시간 이후에만)
+                    if min_hold_passed:
+                        sold, reason = check_profit_targets(ticker, cur, pos)
+                        if sold:
+                            print(f"  💎 {reason}")
+                            time.sleep(2)
+                    else:
+                        print(f"  ⏳ 최소 보유 대기 중 ({held_seconds/60:.0f}/{MIN_HOLD_SECONDS/60:.0f}분)")
 
                     # 트레일링 스톱 업데이트
                     atr = latest['atr']
@@ -444,13 +482,14 @@ def main():
                             print(f"  🚀 트레일링 스톱 상향: {pos['stop_loss']:,.0f} → {new_sl:,.0f}")
                             pos['stop_loss'] = new_sl
 
-                    # 청산 조건 체크
+                    # 청산 조건 체크 (최소 보유시간 이후에만)
                     exit_signal = False
                     exit_reason = ""
-                    if cur < pos['stop_loss']:
-                        exit_signal, exit_reason = True, "손절(트레일링 스톱)"
-                    elif cur < latest['donchian_low'] or (sig['signal'] == 'SELL' and sig['strength'] >= 2):
-                        exit_signal, exit_reason = True, f"청산신호({sig['reason']})"
+                    if min_hold_passed:
+                        if cur < pos['stop_loss']:
+                            exit_signal, exit_reason = True, "손절(트레일링 스톱)"
+                        elif cur < latest['donchian_low'] or (sig['signal'] == 'SELL' and sig['strength'] >= 2):
+                            exit_signal, exit_reason = True, f"청산신호({sig['reason']})"
 
                     if exit_signal:
                         qty = upbit.get_balance(ticker.split('-')[1])
@@ -471,8 +510,8 @@ def main():
                 print(f"💥 [{ticker}] 오류: {e}")
                 continue
 
-        print(f"\n⏳ 다음 사이클 대기 중 (10초)...")
-        time.sleep(10)
+        print(f"\n⏳ 다음 사이클 대기 중 (60초)...")
+        time.sleep(60)  # 10초 → 60초: 1시간봉 데이터는 10초마다 바뀌지 않음
 
 
 if __name__ == "__main__":
